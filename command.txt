@@ -1,0 +1,2 @@
+tar -czf session.tar.gz auth_info_baileys/                                                                                                                             
+  base64 -w 0 session.tar.gz 

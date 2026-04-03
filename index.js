@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const sharp = require('sharp');
 const config = require('./config');
@@ -24,72 +24,131 @@ function pickRandomSticker(dir) {
   return path.join(dir, chosen);
 }
 
+function getMode() {
+  const modeArg = process.argv.find(a => a.startsWith('--mode='));
+  if (modeArg) return modeArg.split('=')[1];
+  const idx = process.argv.indexOf('--mode');
+  if (idx !== -1) return process.argv[idx + 1];
+  // Auto-detect by hour if not specified
+  const hour = new Date().getHours();
+  return (hour >= 5 && hour < 12) ? 'morning' : 'night';
+}
+
+// Silent logger — suppresses Baileys' internal noise
+const logger = {
+  level: 'silent',
+  trace: () => {}, debug: () => {}, info: () => {}, warn: () => {},
+  error: () => {}, fatal: () => {}, child: () => logger,
+};
+
 async function main() {
-  // 1. Random sleep (skipped on GitHub Actions — timing handled by cron schedule there)
+  const mode = getMode();
+  if (mode !== 'morning' && mode !== 'night') {
+    console.error(`Unknown mode: "${mode}". Use --mode=morning or --mode=night`);
+    process.exit(1);
+  }
+
+  const modeConfig = config[mode];
+  console.log(`[${new Date().toISOString()}] Mode: ${mode}`);
+
+  // 1. Random sleep (skipped on GitHub Actions — timing handled by cron schedule)
   if (!process.env.CI) {
-    const delayMs = randomInt(0, config.maxDelayMs);
+    const delayMs = randomInt(0, modeConfig.maxDelayMs);
     const delayMin = Math.round(delayMs / 60000);
     console.log(`[${new Date().toISOString()}] Sleeping ${delayMin} min before sending...`);
     await sleep(delayMs);
   }
 
-  // 2. Pick message and sticker before booting the client (fail fast on bad config)
-  const message = config.messages[randomInt(0, config.messages.length - 1)];
-  const stickerPath = pickRandomSticker(config.stickersDir);
+  // 2. Pick message and sticker before connecting (fail fast on bad config)
+  const message = modeConfig.messages[randomInt(0, modeConfig.messages.length - 1)];
+  const stickerPath = pickRandomSticker(modeConfig.stickersDir);
   console.log(`[${new Date().toISOString()}] Message: "${message}"`);
   console.log(`[${new Date().toISOString()}] Sticker: ${path.basename(stickerPath)}`);
 
-  // 3. Init client with persistent session
-  const client = new Client({
-    authStrategy: new LocalAuth({
-      dataPath: path.join(__dirname, '.wwebjs_auth'),
-    }),
-    puppeteer: {
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
-  });
-
-  // 4. Wire events BEFORE initialize()
-  client.on('qr', qr => {
-    console.log('Scan this QR code with WhatsApp on your phone (+52 1 663 104 6329):');
-    qrcode.generate(qr, { small: true });
-  });
-
-  client.on('authenticated', () => {
-    console.log(`[${new Date().toISOString()}] Session authenticated.`);
-  });
-
-  client.on('auth_failure', msg => {
-    console.error(`[${new Date().toISOString()}] Auth failed: ${msg}`);
-    process.exit(1);
-  });
-
-  client.on('ready', async () => {
-    console.log(`[${new Date().toISOString()}] Client ready. Sending...`);
-    try {
-      await client.sendMessage(config.recipientId, message);
-      console.log(`[${new Date().toISOString()}] Text sent.`);
-
-      // Resize to 512x512 and compress to stay under WhatsApp's 500KB sticker limit
-      const stickerBuffer = await sharp(stickerPath, { animated: true })
-        .resize(512, 512, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
-        .webp({ quality: 40 })
+  // 3. Compress sticker — try decreasing quality/size until under WhatsApp's 500KB limit
+  const MAX_STICKER_BYTES = 500 * 1024;
+  let stickerBuffer;
+  outer: for (const size of [512, 384, 256]) {
+    for (const quality of [40, 25, 15, 8]) {
+      const buf = await sharp(stickerPath, { animated: true })
+        .resize(size, size, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+        .webp({ quality })
         .toBuffer();
-      const media = new MessageMedia('image/webp', stickerBuffer.toString('base64'), path.basename(stickerPath));
-      await client.sendMessage(config.recipientId, media, { sendMediaAsSticker: true });
-      console.log(`[${new Date().toISOString()}] Sticker sent.`);
-    } catch (err) {
-      console.error(`[${new Date().toISOString()}] Error sending:`, err);
-    } finally {
-      await client.destroy();
-      console.log(`[${new Date().toISOString()}] Done.`);
-      process.exit(0);
+      if (buf.length <= MAX_STICKER_BYTES) {
+        console.log(`[${new Date().toISOString()}] Sticker: ${(buf.length / 1024).toFixed(0)}KB (${size}px q${quality})`);
+        stickerBuffer = buf;
+        break outer;
+      }
     }
-  });
+  }
+  if (!stickerBuffer) throw new Error('Could not compress sticker under 500KB');
 
-  // 5. Start
-  await client.initialize();
+  // 4. Connect to WhatsApp via Baileys (no browser needed)
+  const { state, saveCreds } = await useMultiFileAuthState(
+    path.join(__dirname, 'auth_info_baileys')
+  );
+
+  // Fetch current WhatsApp Web version — fixes 405 handshake rejection
+  const { version } = await fetchLatestBaileysVersion();
+  console.log(`[${new Date().toISOString()}] WA version: ${version.join('.')}`);
+
+  const sock = makeWASocket({ auth: state, version, logger });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  // 5. Connect with auto-reconnect on restartRequired (515)
+  let done = false;
+  let currentSock = sock;
+
+  while (!done) {
+    const result = await new Promise((resolve, reject) => {
+      currentSock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+          console.log('Scan this QR code with WhatsApp on your phone:');
+          qrcode.generate(qr, { small: true });
+        }
+
+        if (connection === 'close') {
+          const code = lastDisconnect?.error?.output?.statusCode;
+          if (code === DisconnectReason.restartRequired) {
+            console.log(`[${new Date().toISOString()}] Restart required — reconnecting...`);
+            resolve('restart');
+          } else if (code === DisconnectReason.loggedOut) {
+            console.error(`[${new Date().toISOString()}] Session expired — delete auth_info_baileys/ and re-run.`);
+            reject(new Error('Logged out'));
+          } else {
+            reject(new Error(`Connection closed (code ${code})`));
+          }
+        } else if (connection === 'open') {
+          try {
+            await currentSock.sendMessage(config.recipientId, { text: message });
+            console.log(`[${new Date().toISOString()}] Text sent.`);
+
+            await currentSock.sendMessage(config.recipientId, { sticker: stickerBuffer });
+            console.log(`[${new Date().toISOString()}] Sticker sent.`);
+
+            resolve('done');
+          } catch (err) {
+            reject(err);
+          }
+        }
+      });
+    });
+
+    if (result === 'done') {
+      done = true;
+    } else {
+      // restart: create a fresh socket and loop
+      currentSock = makeWASocket({ auth: state, version, logger });
+      currentSock.ev.on('creds.update', saveCreds);
+    }
+  }
+
+  try { currentSock.end(); } catch (_) {}
+  console.log(`[${new Date().toISOString()}] Done.`);
+  process.exit(0);
 }
 
 main().catch(err => {
