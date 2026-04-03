@@ -20,7 +20,7 @@ module.exports = {
     ],
     stickersDir: path.join(__dirname, 'stickers', 'night'),
     // Retraso de hasta 120 min para que no parezca un bot
-    maxDelayMs: 120 * 60 * 1000,
+    maxDelayMs: 3 * 60 * 1000,
   },
 
   // ── Morning (07:00 cron, window 07:00–09:00) ──────────────────────────────
@@ -36,6 +36,6 @@ module.exports = {
     ],
     stickersDir: path.join(__dirname, 'stickers', 'morning'),
     // Retraso de hasta 120 min
-    maxDelayMs: 120 * 60 * 1000,
+    maxDelayMs: 3 * 60 * 1000,
   },
 };
