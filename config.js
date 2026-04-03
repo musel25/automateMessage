@@ -4,7 +4,7 @@ const path = require('path');
 
 module.exports = {
   // WhatsApp ID of the recipient
-  recipientId: '5216631046329@s.whatsapp.net',
+  recipientId: '5218116596021@s.whatsapp.net',
 
   // ── Night (22:30 cron, window 22:30–00:30) ────────────────────────────────
   night: {
