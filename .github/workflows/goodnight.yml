@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-      - run: npm ci
+      - run: npm install --legacy-peer-deps
       - name: Restore WhatsApp session
         run: echo "${{ secrets.WWEBJS_SESSION }}" | base64 -d | tar -xzf -
       - name: Send message
