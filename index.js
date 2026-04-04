@@ -29,9 +29,9 @@ function getMode() {
   if (modeArg) return modeArg.split('=')[1];
   const idx = process.argv.indexOf('--mode');
   if (idx !== -1) return process.argv[idx + 1];
-  // Auto-detect by hour if not specified
-  const hour = new Date().getHours();
-  return (hour >= 5 && hour < 12) ? 'morning' : 'night';
+  // Auto-detect by hour — use CST (UTC-6) since Mexico no longer observes DST
+  const cstHour = (new Date().getUTCHours() - 6 + 24) % 24;
+  return (cstHour >= 5 && cstHour < 12) ? 'morning' : 'night';
 }
 
 // Silent logger — suppresses Baileys' internal noise
@@ -46,6 +46,21 @@ async function main() {
   if (mode !== 'morning' && mode !== 'night') {
     console.error(`Unknown mode: "${mode}". Use --mode=morning or --mode=night`);
     process.exit(1);
+  }
+
+  // Guard against GitHub Actions cron delay: if GH queued this job hours late,
+  // the UTC time will be far outside the expected send window — skip silently.
+  // Night crons fire at ~04:00–05:18 UTC; morning crons at ~12:40–13:50 UTC.
+  // Windows are generous (±4 h) to tolerate normal GH scheduling lag.
+  if (process.env.CI) {
+    const utcHour = new Date().getUTCHours();
+    const inWindow = mode === 'morning'
+      ? utcHour >= 10 && utcHour < 18   // 04:00–12:00 CST
+      : utcHour >= 0 && utcHour < 10;   // 18:00–04:00 CST
+    if (!inWindow) {
+      console.log(`[${new Date().toISOString()}] Skipping: ${mode} mode at UTC ${utcHour}h is outside expected window (likely a delayed GitHub Actions run).`);
+      process.exit(0);
+    }
   }
 
   const modeConfig = config[mode];
@@ -96,13 +111,23 @@ async function main() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // 5. Connect with auto-reconnect on restartRequired (515)
+  // 5. Connect with auto-reconnect on restartRequired (515).
+  //
+  // Race condition guard: Baileys often fires connection='open' followed almost
+  // immediately by connection='close'/restartRequired (515). If we send on the
+  // first 'open' and restartRequired fires mid-send, the text can be dropped by
+  // WA while the sticker (sent on reconnect) goes through. Fix: capture the
+  // socket reference per-iteration and use a `restarting` flag so the 'open'
+  // handler bails out if a restart was triggered concurrently.
   let done = false;
   let currentSock = sock;
 
   while (!done) {
+    const sockThisRound = currentSock;
+    let restarting = false;
+
     const result = await new Promise((resolve, reject) => {
-      currentSock.ev.on('connection.update', async (update) => {
+      sockThisRound.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -113,6 +138,7 @@ async function main() {
         if (connection === 'close') {
           const code = lastDisconnect?.error?.output?.statusCode;
           if (code === DisconnectReason.restartRequired) {
+            restarting = true;
             console.log(`[${new Date().toISOString()}] Restart required — reconnecting...`);
             resolve('restart');
           } else if (code === DisconnectReason.loggedOut) {
@@ -123,15 +149,17 @@ async function main() {
           }
         } else if (connection === 'open') {
           try {
-            await currentSock.sendMessage(config.recipientId, { text: message });
+            await sockThisRound.sendMessage(config.recipientId, { text: message });
+            if (restarting) return; // restartRequired fired during text send — retry on new socket
             console.log(`[${new Date().toISOString()}] Text sent.`);
 
-            await currentSock.sendMessage(config.recipientId, { sticker: stickerBuffer });
+            await sockThisRound.sendMessage(config.recipientId, { sticker: stickerBuffer });
+            if (restarting) return;
             console.log(`[${new Date().toISOString()}] Sticker sent.`);
 
             resolve('done');
           } catch (err) {
-            reject(err);
+            if (!restarting) reject(err);
           }
         }
       });
