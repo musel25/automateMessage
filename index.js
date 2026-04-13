@@ -29,9 +29,9 @@ function getMode() {
   if (modeArg) return modeArg.split('=')[1];
   const idx = process.argv.indexOf('--mode');
   if (idx !== -1) return process.argv[idx + 1];
-  // Auto-detect by hour — use CST (UTC-6) since Mexico no longer observes DST
-  const cstHour = (new Date().getUTCHours() - 6 + 24) % 24;
-  return (cstHour >= 5 && cstHour < 12) ? 'morning' : 'night';
+  // Auto-detect by hour — use WEST (UTC+1, Portugal summer time)
+  const westHour = (new Date().getUTCHours() + 1) % 24;
+  return (westHour >= 5 && westHour < 12) ? 'morning' : 'night';
 }
 
 // Silent logger — suppresses Baileys' internal noise
@@ -50,13 +50,13 @@ async function main() {
 
   // Guard against GitHub Actions cron delay: if GH queued this job hours late,
   // the UTC time will be far outside the expected send window — skip silently.
-  // Night crons fire at ~04:00–05:18 UTC; morning crons at ~12:40–13:50 UTC.
+  // Morning crons fire at ~06:05–06:55 UTC; night crons at ~21:31–22:18 UTC.
   // Windows are generous (±4 h) to tolerate normal GH scheduling lag.
   if (process.env.CI) {
     const utcHour = new Date().getUTCHours();
     const inWindow = mode === 'morning'
-      ? utcHour >= 10 && utcHour < 18   // 04:00–12:00 CST
-      : utcHour >= 0 && utcHour < 10;   // 18:00–04:00 CST
+      ? utcHour >= 2 && utcHour < 11    // 03:00–12:00 WEST
+      : utcHour >= 17 || utcHour < 3;   // 18:00–04:00 WEST
     if (!inWindow) {
       console.log(`[${new Date().toISOString()}] Skipping: ${mode} mode at UTC ${utcHour}h is outside expected window (likely a delayed GitHub Actions run).`);
       process.exit(0);

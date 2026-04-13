@@ -1,16 +1,16 @@
 name: Good Night Message
 
 on:
-  # Different time each night (all within 10:30 PM – 12:30 AM CST)
-  # UTC times. Mexico (Nuevo León) is permanently CST = UTC-6 (no DST since 2022)
+  # Different time each night (all within 10:30 PM – 12:00 AM WEST)
+  # UTC times. Portugal observes WEST (UTC+1) in summer (late Mar – late Oct)
   schedule:
-    - cron: '47 4 * * 0'  # Sunday    → 10:47 PM CST
-    - cron: '12 5 * * 1'  # Monday    → 11:12 PM CST
-    - cron: '31 4 * * 2'  # Tuesday   → 10:31 PM CST
-    - cron: '55 4 * * 3'  # Wednesday → 10:55 PM CST
-    - cron: '18 5 * * 4'  # Thursday  → 11:18 PM CST
-    - cron: '38 4 * * 5'  # Friday    → 10:38 PM CST
-    - cron: '03 5 * * 6'  # Saturday  → 11:03 PM CST
+    - cron: '47 21 * * 0'  # Sunday    → 10:47 PM WEST
+    - cron: '12 22 * * 1'  # Monday    → 11:12 PM WEST
+    - cron: '31 21 * * 2'  # Tuesday   → 10:31 PM WEST
+    - cron: '55 21 * * 3'  # Wednesday → 10:55 PM WEST
+    - cron: '18 22 * * 4'  # Thursday  → 11:18 PM WEST
+    - cron: '38 21 * * 5'  # Friday    → 10:38 PM WEST
+    - cron: '03 22 * * 6'  # Saturday  → 11:03 PM WEST
   workflow_dispatch:       # manual trigger for testing
 
 jobs:
